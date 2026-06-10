@@ -2,23 +2,34 @@ import psutil
 
 def get_processos():
     processos = []
-
-    for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent']):
+    for proc in psutil.process_iter():
 
         try:
 
-            info = proc.info
-
             processos.append({
-                "pid": info['pid'],
-                "nome": info['name'],
-                "cpu": info['cpu_percent'],
-                "memoria": round(info['memory_percent'], 2)
+                "pid": proc.pid,
+                "nome": proc.name(),
+                "cpu": proc.cpu_percent(),
+                "memoria_mb":
+                    round(
+                        proc.memory_info().rss /
+                        (1024 * 1024),
+                        2
+                    ),
+                "threads": proc.num_threads(),
+                "status": proc.status()
             })
 
-        except:
+        except (
+            psutil.NoSuchProcess,
+            psutil.AccessDenied,
+            psutil.ZombieProcess
+        ):
             pass
 
-    processos = sorted(processos, key=lambda x: x['cpu'], reverse=True)
+    processos.sort(
+        key=lambda x: x["memoria_mb"],
+        reverse=True
+    )
 
-    return processos[:5]
+    return processos[:10]
