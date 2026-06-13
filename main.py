@@ -87,12 +87,17 @@ while True:
     print(f"Uso GPU: {gpu['uso_gpu']}%")
     print(f"Uso Memória GPU: {gpu['uso_memoria_gpu']}%")
     print(f"Temperatura: {gpu['temperatura']}°C")
-    print(f"VRAM Total: {gpu['memoria_total_gb']} GB")
-    print(f"VRAM Usada: {gpu['memoria_usada_gb']} GB")
-    print(f"VRAM Livre: {gpu['memoria_livre_gb']} GB")
-    print(f"Clock GPU: {gpu['clock_gpu']} MHz")
-    print(f"Clock Memória: {gpu['clock_memoria']} MHz")
-    print(f"Driver NVIDIA: {gpu['driver']}")
+    if gpu["usa_memoria_compartilhada"]:
+        print(f"Memória GPU Total: {gpu['memoria_total_gb']} GB")
+        print(f"Memória GPU Usada: {gpu['memoria_usada_gb']} GB")
+        print(f"Memória Compartilhada: {gpu['memoria_compartilhada_gb']} GB")
+
+        if gpu["memoria_dedicada_gb"] != "N/A":
+            print(f"Memória Dedicada: {gpu['memoria_dedicada_gb']} GB")
+    else:
+        print(f"VRAM Total: {gpu['memoria_total_gb']} GB")
+        print(f"VRAM Usada: {gpu['memoria_usada_gb']} GB")
+        print(f"VRAM Livre: {gpu['memoria_livre_gb']} GB")
 
     print("\n===== TOP PROCESSOS =====")
     for proc in processos:
