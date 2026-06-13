@@ -19,8 +19,8 @@ header[data-testid="stHeader"],
         width: 100%;
         opacity: 1 !important;
         filter: none !important;
-        transition: height 120ms ease-out;
-    }
+        transition: none !important;
+}
 
 
 
