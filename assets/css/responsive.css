@@ -535,3 +535,32 @@
         min-height: 0 !important;
     }
 }
+
+
+/* =========================================================
+   Correção de zoom: ajuste instantâneo dos elementos
+   ========================================================= */
+
+html.is-resizing *,
+body.is-resizing *,
+html.no-animations *,
+body.no-animations * {
+    transition: none !important;
+    animation: none !important;
+    scroll-behavior: auto !important;
+}
+
+html.is-resizing .monitor-pages,
+body.is-resizing .monitor-pages {
+    transition: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        transition: none !important;
+        animation: none !important;
+        scroll-behavior: auto !important;
+    }
+}
