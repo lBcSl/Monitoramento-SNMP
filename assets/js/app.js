@@ -1,6 +1,23 @@
 (function () {
     let resizeTimer = null;
 
+    let resizeAnimationTimer = null;
+
+    function markResizing() {
+        document.documentElement.classList.add("is-resizing");
+        document.body.classList.add("is-resizing");
+
+        if (resizeAnimationTimer) {
+            clearTimeout(resizeAnimationTimer);
+        }
+
+        resizeAnimationTimer = setTimeout(function () {
+            document.documentElement.classList.remove("is-resizing");
+            document.body.classList.remove("is-resizing");
+        }, 180);
+    }
+
+
     function getParentViewportHeight() {
         try {
             if (window.parent && window.parent.visualViewport) {
@@ -17,6 +34,7 @@
 
     function resizeIframe() {
         try {
+            markResizing();
             const frame = window.frameElement;
             if (!frame) return;
 
@@ -86,6 +104,11 @@
     function scheduleResize(delay = 0) {
         if (resizeTimer) {
             clearTimeout(resizeTimer);
+        }
+
+        if (delay <= 40) {
+            window.requestAnimationFrame(resizeIframe);
+            return;
         }
 
         resizeTimer = setTimeout(function () {
@@ -320,16 +343,16 @@
     }
 
     window.addEventListener("load", init);
-    window.addEventListener("resize", function () { scheduleResize(40); });
+    window.addEventListener("resize", function () { scheduleResize(0); });
 
     try {
-        window.parent.addEventListener("resize", function () { scheduleResize(40); });
+        window.parent.addEventListener("resize", function () { scheduleResize(0); });
     } catch (error) {}
 
     try {
         if (window.parent && window.parent.visualViewport) {
-            window.parent.visualViewport.addEventListener("resize", function () { scheduleResize(40); });
-            window.parent.visualViewport.addEventListener("scroll", function () { scheduleResize(40); });
+            window.parent.visualViewport.addEventListener("resize", function () { scheduleResize(0); });
+            window.parent.visualViewport.addEventListener("scroll", function () { scheduleResize(0); });
         }
     } catch (error) {}
 
