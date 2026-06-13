@@ -223,4 +223,4 @@ if __name__ == "__main__":
     print(f"Ping: {dados['ping']} ms")
     print(f"Packet Loss: {dados['packet_loss']}%")
     print(f"Jitter: {dados['jitter']} ms")
-    print(f"Tempos: {dados['times']}"
+    print(f"Tempos: {dados['times']}")

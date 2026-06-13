@@ -3,14 +3,14 @@ import time
 import os
 
 from datetime import datetime
-from dados.cpu import get_cpu
-from dados.disco import get_disco
-from dados.gpu import get_gpu
-from dados.memoria import get_memoria
-from dados.processos import get_processos
-from dados.rede import get_rede
-from dados.rede_qualidade import (get_ping, get_packet_loss, get_jitter)
-from historico.salvar import salvar_historico
+from source.dados.cpu import get_cpu
+from source.dados.disco import get_disco
+from source.dados.gpu import get_gpu
+from source.dados.memoria import get_memoria
+from source.dados.processos import get_processos
+from source.dados.rede import get_rede
+from source.dados.rede_qualidade import (get_ping, get_packet_loss, get_jitter)
+from source.historico.salvar import salvar_historico
 
 while True:
 

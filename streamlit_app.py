@@ -13,14 +13,18 @@ Execute:
 
 from __future__ import annotations
 
+import base64
 import html
+import json
 import math
 import platform
 import subprocess
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
+import plotly.graph_objects as go
 import psutil
 import streamlit as st
 import streamlit.components.v1 as components
@@ -68,8 +72,47 @@ except Exception:
 
 APP_NAME = "UNABOARD"
 USER_NAME = "VENSX"
-REFRESH_MS = 5000
+REFRESH_MS = 0  # autorefresh desativado para evitar efeito de opacidade/stale do Streamlit
 MAX_HISTORY = 80
+
+
+BASE_DIR = Path(__file__).resolve().parent
+ASSETS_DIR = BASE_DIR / "assets"
+HISTORY_FILE = BASE_DIR / "historico" / "historico.json"
+
+
+def load_text(relative_path: str) -> str:
+    """Carrega arquivos de assets de forma segura, independente do diretório atual."""
+    path = BASE_DIR / relative_path
+    return path.read_text(encoding="utf-8")
+
+
+def render_template(relative_path: str, **context: str) -> str:
+    template = load_text(relative_path)
+    for key, value in context.items():
+        template = template.replace("{{" + key + "}}", value)
+    return template
+
+
+@st.cache_data(show_spinner=False)
+def svg_to_data_uri(relative_path: str) -> str:
+    path = BASE_DIR / relative_path
+    if not path.exists():
+        return ""
+
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return "data:image/svg+xml;base64," + encoded
+
+
+def icon_img(name: str, class_name: str = "svg-icon") -> str:
+    """Retorna um <img> de SVG usando assets/icons/<name>.svg."""
+    src = svg_to_data_uri(f"assets/icons/{name}.svg")
+    if not src:
+        return ""
+    return f'<img class="{class_name}" src="{src}" alt="">'
+
+
+
 
 
 # =========================================================
@@ -82,11 +125,25 @@ def esc(value: Any) -> str:
 
 def safe_float(value: Any, default: Optional[float] = 0.0) -> Optional[float]:
     try:
-        if value is None or value == "N/A" or value == "--":
+        if value is None or value == "N/A" or value == "--" or value == "":
             return default
+
+        if isinstance(value, str):
+            value = (
+                value.replace("GB", "")
+                .replace("MB", "")
+                .replace("Mbps", "")
+                .replace("ms", "")
+                .replace("%", "")
+                .replace(",", ".")
+                .strip()
+            )
+
         number = float(value)
+
         if math.isnan(number):
             return default
+
         return number
     except Exception:
         return default
@@ -172,6 +229,220 @@ def get_cpu_name() -> str:
         return name or "CPU"
     except Exception:
         return "CPU"
+
+
+
+# =========================================================
+# Histórico JSON
+# =========================================================
+
+def parse_datetime(value: Any):
+    if not value:
+        return None
+
+    if isinstance(value, datetime):
+        return value
+
+    value = str(value).strip()
+
+    formats = [
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y, %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(value[:26], fmt)
+        except Exception:
+            pass
+
+    return None
+
+
+def get_nested(data: Dict[str, Any], *paths, default=None):
+    for path in paths:
+        try:
+            current = data
+
+            if isinstance(path, tuple):
+                for part in path:
+                    current = current[part]
+                return current
+
+            if path in data:
+                return data[path]
+        except Exception:
+            pass
+
+    return default
+
+
+def read_json_any(path: Path):
+    if not path.exists():
+        return None
+
+    text = path.read_text(encoding="utf-8", errors="ignore").strip()
+
+    if not text:
+        return None
+
+    try:
+        return json.loads(text)
+    except Exception:
+        # Suporte a JSON Lines, caso exista um JSON por linha.
+        rows = []
+
+        for line in text.splitlines():
+            line = line.strip().rstrip(",")
+
+            if not line:
+                continue
+
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                pass
+
+        return rows or None
+
+
+def normalize_history_item(raw: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+
+    data = raw
+
+    for wrapper in ("dados", "data", "snapshot", "monitoramento", "hardware"):
+        if isinstance(raw.get(wrapper), dict):
+            data = raw.get(wrapper)
+            break
+
+    gpu = get_nested(data, "gpu", "GPU", "placa_video", "video", default={})
+    rede = get_nested(data, "rede", "REDE", "network", default={})
+    qualidade = get_nested(data, "qualidade_rede", "QUALIDADE DA REDE", "rede_qualidade", "qualidade", default={})
+    memoria = get_nested(data, "memoria", "MEMÓRIA", "MEMORIA", "ram", "RAM", default={})
+
+    if not isinstance(gpu, dict):
+        gpu = {}
+
+    if not isinstance(rede, dict):
+        rede = {}
+
+    if not isinstance(qualidade, dict):
+        qualidade = {}
+
+    if not isinstance(memoria, dict):
+        memoria = {}
+
+    timestamp = (
+        parse_datetime(get_nested(raw, "timestamp", "data", "data_hora", "datetime", "Data do monitoramento"))
+        or parse_datetime(get_nested(data, "timestamp", "data", "data_hora", "datetime", "Data do monitoramento"))
+        or datetime.now()
+    )
+
+    ram_percent = get_nested(
+        data,
+        "ram_percent",
+        "RAM",
+        "ram",
+        ("memoria", "percent"),
+        ("memoria", "porcentagem"),
+        default=None,
+    )
+
+    if ram_percent is None:
+        ram_percent = get_nested(memoria, "percent", "porcentagem", "uso", "RAM", default=None)
+
+    ram_used_gb = get_nested(
+        data,
+        "ram_used_gb",
+        "ram_usada",
+        "RAM usada",
+        ("memoria", "used"),
+        ("memoria", "usada"),
+        default=None,
+    )
+
+    if ram_used_gb is None:
+        ram_used_gb = get_nested(memoria, "used", "usada", "RAM usada", "ram_usada", default=None)
+
+    item = {
+        "timestamp": timestamp,
+        "cpu_percent": safe_float(get_nested(data, "cpu_percent", "CPU", "cpu", "uso_cpu", default=None), 0),
+        "ram_percent": safe_float(ram_percent, 0),
+        "ram_used_gb": safe_float(ram_used_gb, 0),
+
+        "download_mbps": safe_float(get_nested(data, "download_mbps", "Download", "download", ("rede", "download"), default=None), 0),
+        "upload_mbps": safe_float(get_nested(data, "upload_mbps", "Upload", "upload", ("rede", "upload"), default=None), 0),
+
+        "ping": safe_float(get_nested(data, "ping", "Ping", ("qualidade_rede", "ping"), default=None), None),
+        "packet_loss": safe_float(get_nested(data, "packet_loss", "Packet Loss", "packet loss", ("qualidade_rede", "packet_loss"), default=None), None),
+        "jitter": safe_float(get_nested(data, "jitter", "Jitter", ("qualidade_rede", "jitter"), default=None), None),
+
+        "gpu_percent": safe_float(get_nested(data, "gpu_percent", "Uso GPU", "uso_gpu", ("gpu", "uso_gpu"), default=None), 0),
+        "gpu_memory_percent": safe_float(get_nested(data, "gpu_memory_percent", "Uso Memória GPU", "uso_memoria_gpu", ("gpu", "uso_memoria_gpu"), default=None), 0),
+        "gpu_temp": safe_float(get_nested(data, "gpu_temp", "Temperatura", "temperatura", ("gpu", "temperatura"), default=None), None),
+    }
+
+    # Fallbacks por blocos.
+    if item["gpu_percent"] == 0:
+        item["gpu_percent"] = safe_float(get_nested(gpu, "uso_gpu", "Uso GPU", "gpu_percent", default=0), 0)
+
+    if item["gpu_memory_percent"] == 0:
+        item["gpu_memory_percent"] = safe_float(get_nested(gpu, "uso_memoria_gpu", "Uso Memória GPU", "gpu_memory_percent", default=0), 0)
+
+    if item["gpu_temp"] is None:
+        item["gpu_temp"] = safe_float(get_nested(gpu, "temperatura", "Temperatura", "gpu_temp", default=None), None)
+
+    if item["download_mbps"] == 0:
+        item["download_mbps"] = safe_float(get_nested(rede, "download_mbps", "download", "Download", default=0), 0)
+
+    if item["upload_mbps"] == 0:
+        item["upload_mbps"] = safe_float(get_nested(rede, "upload_mbps", "upload", "Upload", default=0), 0)
+
+    if item["ping"] is None:
+        item["ping"] = safe_float(get_nested(qualidade, "ping", "Ping", default=None), None)
+
+    if item["packet_loss"] is None:
+        item["packet_loss"] = safe_float(get_nested(qualidade, "packet_loss", "Packet Loss", "packet loss", default=None), None)
+
+    if item["jitter"] is None:
+        item["jitter"] = safe_float(get_nested(qualidade, "jitter", "Jitter", default=None), None)
+
+    return item
+
+
+def load_history_from_file(path: Path = HISTORY_FILE) -> List[Dict[str, Any]]:
+    raw = read_json_any(path)
+
+    if raw is None:
+        return []
+
+    if isinstance(raw, dict):
+        for key in ("historico", "history", "dados", "registros", "snapshots", "monitoramentos"):
+            if isinstance(raw.get(key), list):
+                raw = raw[key]
+                break
+        else:
+            raw = [raw]
+
+    if not isinstance(raw, list):
+        return []
+
+    normalized = []
+
+    for item in raw:
+        if isinstance(item, dict):
+            row = normalize_history_item(item)
+
+            if row:
+                normalized.append(row)
+
+    normalized.sort(key=lambda x: x.get("timestamp") or datetime.min)
+    return normalized[-MAX_HISTORY:]
 
 
 # =========================================================
@@ -414,13 +685,83 @@ def row_html(name: str, value: str, min_value: str = "-", max_value: str = "-") 
     """
 
 
+def section_icon_for_title(icon: str, title: str, extra: str = "") -> str:
+    title_upper = str(title).upper()
+    extra_upper = str(extra).upper()
+
+    if "MEMÓRIA" in title_upper or "MEMORIA" in title_upper:
+        return icon_img("memoria", "section-svg")
+
+    if "USO DA REDE" in title_upper:
+        return icon_img("uso_rede", "section-svg")
+
+    if "QUALIDADE" in title_upper and "REDE" in title_upper:
+        return icon_img("qualidade_rede", "section-svg")
+
+    if "DRIVER" in extra_upper:
+        return icon_img("gpu", "section-svg")
+
+    if (
+        "CPU" in title_upper
+        or "RYZEN" in title_upper
+        or "CORE" in title_upper
+        or "PROCESSOR" in title_upper
+    ):
+        return icon_img("cpu", "section-svg")
+
+    # Fallback: mantém o símbolo antigo se não houver ícone mapeado.
+    return f"<span>{esc(icon)}</span>"
+
+
 def section_title(icon: str, title: str, extra: str = "") -> str:
     extra_html = f"<span class='section-extra'>{esc(extra)}</span>" if extra else ""
     return f"""
     <div class="section-title">
-        <span class="section-icon">{icon}</span>
+        <span class="section-icon">{section_icon_for_title(icon, title, extra)}</span>
         <span>{esc(title)}</span>
         {extra_html}
+    </div>
+    """
+
+
+def render_network_page(snapshot: Dict[str, Any]) -> str:
+    network = snapshot.get("network", {}) or {}
+
+    download_atual = network.get("download_mbps", snapshot.get("download_mbps", 0))
+    upload_atual = network.get("upload_mbps", snapshot.get("upload_mbps", 0))
+    ping_atual = network.get("ping", snapshot.get("ping"))
+    packet_loss_atual = network.get("packet_loss", snapshot.get("packet_loss"))
+    jitter_atual = network.get("jitter", snapshot.get("jitter"))
+
+    # Velocidade de link. Se o módulo de rede futuramente trouxer estes campos,
+    # o card já usa automaticamente. Por enquanto fica com fallback 100/100 Mbps.
+    download_link = network.get("download_link_mbps", network.get("link_download_mbps", 100))
+    upload_link = network.get("upload_link_mbps", network.get("link_upload_mbps", 100))
+
+    def network_row(name: str, link: str, atual: str, percent: str = "--") -> str:
+        return f"""
+        <div class="network-row">
+            <div class="sensor-name"><span class="small-square"></span>{esc(name)}</div>
+            <div>{esc(link)}</div>
+            <div>{esc(atual)}</div>
+            <div>{esc(percent)}</div>
+        </div>
+        """
+
+    return f"""
+    <div class="monitor-page" data-page="rede">
+        <div class="network-head">
+            <div>SENSOR</div><div>LINK</div><div>ATUAL</div><div>%</div>
+        </div>
+
+        {section_title("◉", "USO DA REDE")}
+        {network_row("DOWNLOAD", fmt_num(download_link, "Mbps", 0), fmt_mbps(download_atual), "--")}
+        {network_row("UPLOAD", fmt_num(upload_link, "Mbps", 0), fmt_mbps(upload_atual), "--")}
+
+        {section_title("▥", "QUALIDADE DA REDE")}
+        {network_row("PING", "--", fmt_num(ping_atual, "ms", 1), "--")}
+        {network_row("PACKET LOSS", "--", fmt_percent(packet_loss_atual), "--")}
+        {network_row("JITTER", "--", fmt_num(jitter_atual, "ms", 2), "--")}
     </div>
     """
 
@@ -438,28 +779,9 @@ def render_monitor_card(snapshot: Dict[str, Any]) -> str:
     driver = str(snapshot.get("gpu_driver") or "--")
     cpu_name = str(snapshot.get("cpu_name") or "CPU")
 
-    # Para iGPU Intel sem dedicada real, o total correto é a memória compartilhada.
-    dedicated_total = safe_float(gpu.get("memoria_dedicada_total_gb"), None)
-    shared_total = safe_float(gpu.get("memoria_compartilhada_total_gb"), None)
-    shared_used = safe_float(gpu.get("memoria_compartilhada_gb"), None)
-
-    gpu_is_integrated_without_dedicated = dedicated_total is None or dedicated_total <= 0
-
-    if gpu_is_integrated_without_dedicated and shared_total is not None:
-        gpu_total_display = shared_total
-        gpu_used_display = shared_used if shared_used is not None else gpu.get("memoria_usada_gb")
-        memory_gpu_value = fmt_gb_pair(gpu_used_display, gpu_total_display)
-    else:
-        memory_gpu_value = fmt_percent(gpu.get("uso_memoria_gpu"))
-
-    rows = [
+    monitor_rows = [
         """
-        <div class="monitor-card card">
-            <div class="card-title">
-                <div><span class="title-icon">▣</span> MONITOR</div>
-                <div class="title-arrow">›</div>
-            </div>
-            <div class="divider"></div>
+        <div class="monitor-page is-active" data-page="monitor">
             <div class="metric-head">
                 <div>SENSOR</div><div>VALOR</div><div>MIN</div><div>MAX</div>
             </div>
@@ -469,34 +791,41 @@ def render_monitor_card(snapshot: Dict[str, Any]) -> str:
     ]
 
     for disk in snapshot["disks"][:2]:
-        rows.append(row_html(str(disk.get("nome", "DISCO")), fmt_percent(disk.get("percent")), "-", "-"))
+        monitor_rows.append(row_html(str(disk.get("nome", "DISCO")), fmt_percent(disk.get("percent")), "-", "-"))
 
-    rows.extend(
+    monitor_rows.extend(
         [
             section_title("◉", gpu_name, f"Driver {driver}"),
             row_html("USO GPU", fmt_percent(gpu.get("uso_gpu")), fmt_percent(gpu_min), fmt_percent(gpu_max)),
-            row_html("MEMÓRIA GPU", memory_gpu_value, fmt_percent(gpu_mem_min), fmt_percent(gpu_mem_max)),
+            row_html("MEMÓRIA GPU", fmt_percent(gpu.get("uso_memoria_gpu")), fmt_percent(gpu_mem_min), fmt_percent(gpu_mem_max)),
             row_html("TEMPERATURA", f"{fmt_num(gpu.get('temperatura'), '°C', 0)}", f"{fmt_num(temp_min, '°C', 0)}", f"{fmt_num(temp_max, '°C', 0)}"),
         ]
     )
 
-    if gpu_is_integrated_without_dedicated and shared_total is not None:
-        rows.extend(
+    # Exibição de memória GPU:
+    # - iGPU/APU: mostra memória total, usada, compartilhada e dedicada.
+    # - GPU dedicada: mostra VRAM total, usada e livre.
+    if gpu.get("usa_memoria_compartilhada"):
+        monitor_rows.extend(
             [
-                row_html("MEM. COMPARTILHADA", fmt_gb_pair(gpu.get("memoria_compartilhada_gb"), gpu.get("memoria_compartilhada_total_gb")), "-", "-"),
-                row_html("MEM. DEDICADA", "--", "-", "-"),
+                row_html("MEM. GPU TOTAL", fmt_gb(gpu.get("memoria_total_gb")), "-", "-"),
+                row_html("MEM. GPU USADA", fmt_gb(gpu.get("memoria_usada_gb")), "-", "-"),
+                row_html("MEM. COMPARTILHADA", fmt_gb(gpu.get("memoria_compartilhada_gb")), "-", "-"),
             ]
         )
+
+        if gpu.get("memoria_dedicada_gb") != "N/A":
+            monitor_rows.append(row_html("MEM. DEDICADA", fmt_gb(gpu.get("memoria_dedicada_gb")), "-", "-"))
     else:
-        rows.extend(
+        monitor_rows.extend(
             [
-                row_html("VRAM TOTAL", fmt_gb(gpu.get("memoria_dedicada_total_gb") if dedicated_total and dedicated_total > 0 else gpu.get("memoria_total_gb")), "-", "-"),
-                row_html("VRAM USADA", fmt_gb(gpu.get("memoria_dedicada_gb") if dedicated_total and dedicated_total > 0 else gpu.get("memoria_usada_gb")), "-", "-"),
+                row_html("VRAM TOTAL", fmt_gb(gpu.get("memoria_total_gb")), "-", "-"),
+                row_html("VRAM USADA", fmt_gb(gpu.get("memoria_usada_gb")), "-", "-"),
                 row_html("VRAM LIVRE", fmt_gb(gpu.get("memoria_livre_gb")), "-", "-"),
             ]
         )
 
-    rows.extend(
+    monitor_rows.extend(
         [
             row_html("CLOCK GPU", f"{fmt_num(gpu.get('clock_gpu'), ' MHz', 0)}", "--", "--"),
             row_html("CLOCK MEMÓRIA", f"{fmt_num(gpu.get('clock_memoria'), ' MHz', 0)}", "--", "--"),
@@ -506,15 +835,33 @@ def render_monitor_card(snapshot: Dict[str, Any]) -> str:
         ]
     )
 
-    return "".join(rows)
+    return f"""
+    <div class="monitor-card card" id="monitor-card" data-monitor-icon="{esc(icon_img('monitor', 'title-svg'))}" data-rede-icon="{esc(icon_img('rede', 'title-svg'))}">
+        <div class="card-title">
+            <div>
+                <span class="title-icon" id="monitor-title-icon">{icon_img("monitor", "title-svg")}</span>
+                <span id="monitor-title-text">MONITOR</span>
+            </div>
+            <button class="monitor-page-btn" id="monitor-page-btn" type="button" title="Alternar página">›</button>
+        </div>
+        <div class="divider"></div>
+
+        <div class="monitor-carousel">
+            <div class="monitor-pages" id="monitor-pages">
+                {''.join(monitor_rows)}
+                {render_network_page(snapshot)}
+            </div>
+        </div>
+    </div>
+    """
 
 
 def render_process_card(snapshot: Dict[str, Any]) -> str:
     rows = [
-        """
+        f"""
         <div class="process-card card">
             <div class="card-title">
-                <div><span class="title-icon">▦</span> PROCESSOS</div>
+                <div><span class="title-icon">{icon_img("processos", "title-svg")}</span> PROCESSOS</div>
             </div>
             <div class="divider"></div>
             <div class="process-head">
@@ -544,54 +891,222 @@ def render_process_card(snapshot: Dict[str, Any]) -> str:
 
 
 def render_chat_card() -> str:
+    """
+    Chatbot funcional para futura integração com IA.
+
+    Hoje ele funciona no front-end:
+    - permite digitar mensagens;
+    - envia com Enter ou botão;
+    - mostra histórico da conversa;
+    - salva temporariamente no sessionStorage do navegador;
+    - possui uma função JS chamada generateBotResponse(message),
+      que depois pode ser substituída por chamada para API/IA.
+    """
     return f"""
     <div class="chat-card card">
-        <div class="card-title"><div><span class="title-icon">◔</span> CHATBOT</div></div>
-        <div class="chat-space"></div>
-        <div class="fake-input">
-            <span>DIGITE AQUI...</span>
-            <span class="send-icon">⌲</span>
+        <div class="card-title"><div><span class="title-icon">{icon_img("chatbot", "title-svg")}</span> CHATBOT</div></div>
+
+        <div id="chat-messages" class="chat-messages">
+            <div class="chat-bubble bot">
+                Olá! Posso ajudar a interpretar os dados do monitoramento.
+            </div>
+        </div>
+
+        <div class="chat-input-row">
+            <input id="chat-input" class="chat-input" type="text" placeholder="DIGITE AQUI..." autocomplete="off" />
+            <button id="chat-send" class="chat-send" type="button" title="Enviar">{icon_img("chatbot_enviar", "send-svg")}</button>
         </div>
     </div>
     """
+
+
+
+
+
+def build_yaxis_ticks(values: List[float], suffix: str):
+    """
+    Cria tickvals/ticktext para o eixo Y.
+    Evita o bug visual em que o Plotly mostra só "Mbps" sem o número.
+    """
+    clean_values = [safe_float(v, None) for v in values]
+    clean_values = [float(v) for v in clean_values if v is not None]
+
+    if not clean_values:
+        clean_values = [0.0]
+
+    max_value = max(clean_values)
+    min_value = min(clean_values)
+
+    if max_value == min_value:
+        max_value = max_value + 1
+
+    # Para porcentagem, mantém uma escala amigável.
+    if suffix == "%":
+        upper = max(100, max_value)
+        tickvals = [0, 20, 40, 60, 80, 100] if upper <= 100 else [0, upper * .25, upper * .5, upper * .75, upper]
+    else:
+        upper = max_value
+
+        if upper <= 0:
+            upper = 1
+
+        tickvals = [0, upper * .25, upper * .5, upper * .75, upper]
+
+    def tick_label(v):
+        if suffix == "%":
+            return f"{fmt_num(v, '', 0)}%"
+        if suffix.strip() == "Mbps":
+            return f"{fmt_num(v, '', 1)}M"
+        if suffix.strip() == "ms":
+            return f"{fmt_num(v, '', 0)}ms"
+        return f"{fmt_num(v, '', 1)}{suffix}"
+
+    ticktext = [tick_label(v) for v in tickvals]
+    return tickvals, ticktext
+
+
+
+def make_plotly_line_chart(points: List[Any], label: str, suffix: str = "%", max_points: int = 80, include_js: bool = False) -> str:
+    """
+    Cria um gráfico Plotly em HTML para ser usado dentro do components.html().
+    Mantém o visual do card antigo, mas com Plotly.
+    """
+    values = []
+    labels = []
+
+    for idx, item in enumerate(st.session_state.get("history", [])[-max_points:]):
+        value = safe_float(item.get(points), None)
+
+        if value is None:
+            continue
+
+        values.append(float(value))
+
+        ts = item.get("timestamp")
+        labels.append(ts.strftime("%H:%M:%S") if hasattr(ts, "strftime") else str(idx + 1))
+
+    if len(values) < 2:
+        return f"""
+        <div class="mini-chart">
+            <div class="mini-chart-header">
+                <span>{esc(label)}</span>
+                <strong>--{esc(suffix)}</strong>
+            </div>
+            <div class="empty-chart">Aguardando histórico...</div>
+        </div>
+        """
+
+    last_value = values[-1]
+    min_label = fmt_num(min(values), suffix, 1)
+    max_label = fmt_num(max(values), suffix, 1)
+    last_label = fmt_num(last_value, suffix, 1)
+
+    tickvals, ticktext = build_yaxis_ticks(values, suffix)
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=labels,
+            y=values,
+            mode="lines",
+            line=dict(color="#E84E62", width=2.4, shape="spline"),
+            fill="tozeroy",
+            fillcolor="rgba(232, 78, 98, 0.13)",
+            hovertemplate=f"{label}: %{{y:.2f}}{suffix}<extra></extra>",
+        )
+    )
+
+    fig.update_layout(
+        autosize=True,
+        margin=dict(l=48, r=8, t=4, b=10),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="#F7F9FC",
+        font=dict(color="#374957", size=10, family="Segoe UI"),
+        xaxis=dict(showgrid=False, showticklabels=False, zeroline=False, automargin=True),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor="#DDE5EE",
+            zeroline=False,
+            tickmode="array",
+            tickvals=tickvals,
+            ticktext=ticktext,
+            tickfont=dict(size=10, color="#374957"),
+            automargin=True,
+        ),
+        hovermode="x unified",
+        showlegend=False,
+    )
+
+    fig.update_xaxes(showline=True, linewidth=1, linecolor="#C8D1DC")
+    fig.update_yaxes(showline=True, linewidth=1, linecolor="#C8D1DC")
+
+    plot_html = fig.to_html(
+        full_html=False,
+        include_plotlyjs=True if include_js else False,
+        config={"displayModeBar": False, "responsive": True},
+        default_width="100%",
+        default_height="100%",
+    )
+
+    return f"""
+    <div class="mini-chart">
+        <div class="mini-chart-header">
+            <span>{esc(label)}</span>
+            <strong>{esc(last_label)}</strong>
+        </div>
+
+        <div class="plotly-mini">
+            {plot_html}
+        </div>
+
+        <div class="chart-minmax">
+            <span>MIN {esc(min_label)}</span>
+            <span>MAX {esc(max_label)}</span>
+        </div>
+    </div>
+    """
+
+
+def history_values(key: str) -> List[Any]:
+    return [item.get(key) for item in st.session_state.get("history", [])]
+
 
 
 def render_graph_card() -> str:
-    return """
+    chart_specs = [
+        ("cpu_percent", "CPU", "%"),
+        ("ram_percent", "MEMÓRIA RAM", "%"),
+        ("gpu_percent", "GPU", "%"),
+        ("gpu_memory_percent", "MEMÓRIA GPU", "%"),
+        ("download_mbps", "DOWNLOAD", " Mbps"),
+        ("upload_mbps", "UPLOAD", " Mbps"),
+        ("ping", "PING", " ms"),
+        ("jitter", "JITTER", " ms"),
+    ]
+
+    charts = []
+
+    for index, (key, label, suffix) in enumerate(chart_specs):
+        charts.append(make_plotly_line_chart(key, label, suffix, include_js=(index == 0)))
+
+    return f"""
     <div class="graph-card card">
-        <div class="card-title"><div><span class="title-icon">▣</span> GRÁFICOS</div></div>
+        <div class="card-title"><div><span class="title-icon">{icon_img("graficos", "title-svg")}</span> GRÁFICOS</div></div>
+        <div class="charts-grid">
+            {''.join(charts)}
+        </div>
     </div>
     """
-
 
 def render_page(snapshot: Dict[str, Any]) -> str:
-    return f"""
-    <div class="topbar">
-        <div class="brand">
-            <span class="brand-mark">〉</span>
-            <span>UNABOARD</span>
-        </div>
-
-        <div class="user-box">
-            <span>{esc(USER_NAME)}</span>
-            <span class="avatar"></span>
-            <span class="down-arrow">▾</span>
-        </div>
-    </div>
-
-    <main class="dashboard-wrap">
-        <div class="dashboard-grid">
-            {render_chat_card()}
-
-            <div class="middle-stack">
-                {render_monitor_card(snapshot)}
-                {render_process_card(snapshot)}
-            </div>
-
-            {render_graph_card()}
-        </div>
-    </main>
-    """
+    return render_template(
+        "assets/html/dashboard.html",
+        CHAT_CARD=render_chat_card(),
+        MONITOR_CARD=render_monitor_card(snapshot),
+        PROCESS_CARD=render_process_card(snapshot),
+        GRAPH_CARD=render_graph_card(),
+    )
 
 
 # =========================================================
@@ -605,8 +1120,12 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-if st_autorefresh:
-    st_autorefresh(interval=REFRESH_MS, key="unaboard_refresh")
+# Autorefresh desativado: o Streamlit deixa elementos antigos semitransparentes durante reruns.
+# Use F5/Ctrl+R para atualizar manualmente ou reative com um intervalo maior depois.
+
+if "history_loaded_from_file" not in st.session_state:
+    st.session_state.history = load_history_from_file()
+    st.session_state.history_loaded_from_file = True
 
 if "history" not in st.session_state:
     st.session_state.history = []
@@ -616,366 +1135,29 @@ st.session_state.history.append(snapshot)
 st.session_state.history = st.session_state.history[-MAX_HISTORY:]
 
 
-st.markdown("""
+st.markdown(
+    f"""
 <style>
-    header[data-testid="stHeader"],
-    div[data-testid="stToolbar"],
-    footer,
-    #MainMenu {
-        display: none !important;
-    }
-
-    .block-container {
-        padding: 0 !important;
-        max-width: none !important;
-    }
-
-    .stApp {
-        background: #DDE2E7;
-    }
-
-    iframe {
-        display: block;
-        width: 100%;
-        opacity: 1 !important;
-        filter: none !important;
-    }
+{load_text("assets/css/streamlit_host.css")}
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
-CSS = """
-    <meta name="color-scheme" content="light only">
-    <style>
-        :root {
-            color-scheme: light !important;
 
-            /* Paleta com mais contraste */
-            --bg: #DCE2E8;
-            --card: #FFFFFF;
-            --text: #1B2A41;
-            --muted: #4F5E72;
-            --border: #AEB9C6;
-            --shadow: 0 10px 26px rgba(27, 42, 65, 0.22);
-            --soft-shadow: 0 6px 18px rgba(27, 42, 65, 0.16);
-            --red: #E84E62;
-        }
+DASHBOARD_CSS = f"""
+<meta name="color-scheme" content="light only">
+<style>
+{load_text("assets/css/dashboard.css")}
+</style>
+"""
 
-        * {
-            box-sizing: border-box;
-        }
+DASHBOARD_JS = f"""
+<script>
+{load_text("assets/js/app.js")}
+</script>
+"""
 
-        html, body, [class*="css"] {
-            font-family: "Segoe UI", Inter, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-        }
+components.html(DASHBOARD_CSS + render_page(snapshot) + DASHBOARD_JS, height=900, scrolling=False)
 
-        html, body {
-            color-scheme: light !important;
-        }
-
-        body {
-            margin: 0;
-            background: var(--bg);
-            color: var(--text);
-            overflow: hidden;
-            opacity: 1 !important;
-            filter: none !important;
-            -webkit-font-smoothing: antialiased;
-            text-rendering: geometricPrecision;
-        }
-
-        body * {
-            filter: none !important;
-        }
-
-        .topbar {
-            height: 72px;
-            background: #FFFFFF;
-            border-bottom: 1px solid #B9C3D0;
-            box-shadow: 0 8px 24px rgba(35, 45, 55, 0.20);
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 0 34px 0 40px;
-            color: #0A0D13;
-            opacity: 1 !important;
-        }
-
-        .brand {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 23px;
-            font-weight: 600;
-            letter-spacing: 1.2px;
-            color: #05070A !important;
-        }
-
-        .brand-mark {
-            color: var(--red);
-            font-size: 34px;
-            line-height: 1;
-            font-weight: 300;
-            transform: scaleX(.72);
-            display: inline-block;
-        }
-
-        .user-box {
-            display: flex;
-            align-items: center;
-            gap: 11px;
-            font-size: 20px;
-            font-weight: 600;
-            letter-spacing: .8px;
-            color: #18263E;
-        }
-
-        .avatar {
-            width: 36px;
-            height: 36px;
-            border-radius: 50%;
-            display: inline-block;
-            background:
-                radial-gradient(circle at 65% 30%, #FBE0D8 0 18%, transparent 19%),
-                radial-gradient(circle at 45% 45%, #1F1620 0 24%, transparent 25%),
-                linear-gradient(135deg, #090B12 0 42%, #D74A57 43% 100%);
-            box-shadow: inset 0 0 0 2px rgba(255,255,255,.65);
-        }
-
-        .down-arrow {
-            color: #23314A;
-            font-size: 16px;
-            margin-left: 2px;
-        }
-
-        .dashboard-wrap {
-            padding: 32px 32px 34px 32px;
-            min-height: calc(100vh - 72px);
-        }
-
-        .dashboard-grid {
-            display: grid;
-            grid-template-columns: 330px 475px minmax(500px, 1fr);
-            gap: 22px;
-            min-height: calc(100vh - 138px);
-        }
-
-        .middle-stack {
-            display: grid;
-            grid-template-rows: 445px minmax(0, 1fr);
-            gap: 22px;
-            min-height: calc(100vh - 138px);
-        }
-
-        .card {
-            background: var(--card);
-            border-radius: 8px;
-            border: 1px solid rgba(171, 184, 199, .98);
-            box-shadow: var(--shadow);
-            color: var(--text);
-            opacity: 1 !important;
-        }
-
-        .chat-card,
-        .graph-card {
-            min-height: calc(100vh - 138px);
-        }
-
-        .chat-card {
-            padding: 22px 16px 16px 16px;
-            display: flex;
-            flex-direction: column;
-        }
-
-        .chat-space {
-            flex: 1;
-        }
-
-        .fake-input {
-            height: 31px;
-            width: 100%;
-            border: 1px solid #E0E5EC;
-            border-radius: 999px;
-            box-shadow: inset 0 1px 2px rgba(0,0,0,.04), 0 2px 8px rgba(0,0,0,.08);
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 0 11px 0 16px;
-            font-size: 10px;
-            font-weight: 600;
-            color: #8290A1;
-            letter-spacing: .2px;
-        }
-
-        .send-icon {
-            font-size: 18px;
-            color: #26344D;
-            line-height: 1;
-        }
-
-        .monitor-card {
-            padding: 18px 18px 14px 18px;
-            overflow: hidden;
-        }
-
-        .process-card {
-            padding: 18px 18px 14px 18px;
-            overflow: hidden;
-        }
-
-        .graph-card {
-            padding: 22px 18px 18px 18px;
-        }
-
-        .card-title {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            font-size: 18px;
-            font-weight: 600;
-            letter-spacing: 1.1px;
-            color: var(--text);
-        }
-
-        .title-icon {
-            font-size: 22px;
-            margin-right: 9px;
-            color: var(--text);
-            vertical-align: -1px;
-        }
-
-        .title-arrow {
-            color: var(--text);
-            font-size: 31px;
-            font-weight: 300;
-            line-height: 1;
-            margin-top: -2px;
-        }
-
-        .divider {
-            height: 1px;
-            background: var(--border);
-            margin: 14px 0 13px 0;
-        }
-
-        .metric-head,
-        .metric-row {
-            display: grid;
-            grid-template-columns: 1.7fr .72fr .53fr .53fr;
-            align-items: center;
-            column-gap: 8px;
-        }
-
-        .metric-head {
-            color: var(--text);
-            font-size: 14px;
-            font-weight: 600;
-            letter-spacing: .9px;
-            margin-bottom: 11px;
-        }
-
-        .metric-row {
-            color: var(--text);
-            font-size: 11px;
-            line-height: 1.38;
-            font-weight: 600;
-        }
-
-        .section-title {
-            display: flex;
-            align-items: center;
-            gap: 7px;
-            color: var(--text);
-            font-size: 12px;
-            line-height: 1.1;
-            font-weight: 600;
-            margin: 10px 0 5px 0;
-        }
-
-        .section-icon {
-            font-size: 15px;
-            width: 16px;
-            display: inline-flex;
-            justify-content: center;
-        }
-
-        .section-extra {
-            font-size: 7px;
-            color: var(--muted);
-            font-weight: 600;
-            letter-spacing: 0;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            max-width: 135px;
-        }
-
-        .sensor-name {
-            display: flex;
-            align-items: center;
-            gap: 7px;
-            padding-left: 24px;
-            white-space: nowrap;
-            min-width: 0;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-
-        .small-square {
-            width: 7px;
-            height: 7px;
-            border: 1.35px solid var(--text);
-            border-radius: 2px;
-            display: inline-block;
-            flex: 0 0 auto;
-        }
-
-        .process-head,
-        .process-row {
-            display: grid;
-            grid-template-columns: 1.5fr .55fr .85fr .65fr;
-            align-items: center;
-            column-gap: 10px;
-        }
-
-        .process-head {
-            font-size: 16px;
-            font-weight: 600;
-            letter-spacing: 1px;
-            margin-bottom: 12px;
-        }
-
-        .process-row {
-            font-size: 11px;
-            line-height: 1.45;
-            font-weight: 600;
-            color: var(--text);
-        }
-
-        @media (max-width: 1350px) {
-            .dashboard-grid {
-                grid-template-columns: 300px 430px minmax(420px, 1fr);
-                gap: 18px;
-            }
-
-            .middle-stack {
-                grid-template-rows: 445px minmax(0, 1fr);
-            }
-
-            .card-title {
-                font-size: 16px;
-            }
-
-            .metric-head {
-                font-size: 13px;
-            }
-
-            .metric-row,
-            .process-row {
-                font-size: 10px;
-            }
-        }
-    </style>
-    """
-
-components.html(CSS + render_page(snapshot), height=980, scrolling=False)
 
