@@ -1,0 +1,6 @@
+streamlit
+plotly
+pandas
+psutil
+nvidia-ml-py
+streamlit-autorefresh
