@@ -21,7 +21,7 @@ except ImportError:
 
 # Para projeto local/faculdade:
 # Cole sua chave aqui, se não quiser usar variável de ambiente.
-API_KEY = "AQ.Ab8RN6IEtpDJOJDhGO7r_6Y2VCECs98x8NJvxczec-FrhO36ag"
+API_KEY = "INSERIR_CHAVE_API_AQUI"
 
 INSTRUCAO_SISTEMA = """
 Você é o UNABOARD, um Assistente de TI avançado integrado a um painel
@@ -52,7 +52,7 @@ def _get_api_key() -> str:
         or os.getenv("GOOGLE_API_KEY")
     )
 
-    if not api_key or api_key != "AQ.Ab8RN6IEtpDJOJDhGO7r_6Y2VCECs98x8NJvxczec-FrhO36ag":
+    if not api_key or api_key != "INSERIR_CHAVE_API_AQUI":
         raise RuntimeError(
             "Chave da Gemini não configurada. "
             "Cole a chave em API_KEY no chatbot.py ou defina GEMINI_API_KEY."
