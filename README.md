@@ -53,6 +53,7 @@ MoniSNMP/
 │   └── processos.py
 ├── historico/
 │   ├── historico.json
+│   ├── salvar.py
 │   └── ultimo_refresh.txt
 ├── chatbot.py
 ├── chatbot_api.py
