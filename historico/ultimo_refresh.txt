@@ -1,0 +1,4 @@
+Último refresh registrado pelo main.py
+timestamp: 2026-06-15T10:04:13
+arquivo: C:\Users\Gabriel\Downloads\Teste\historico\historico.json
+itens_no_historico: 7

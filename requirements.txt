@@ -1,0 +1,9 @@
+streamlit
+streamlit-autorefresh
+pandas
+plotly
+psutil
+nvidia-ml-py
+google-genai
+fastapi
+uvicorn
